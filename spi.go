@@ -46,6 +46,10 @@ const (
 //   - SPIClock5 - 1.875 MHz.
 //   - SPIClock6 - 937.5 KHz.
 //   - SPIClock7 - 468.75 KHz.
+//
+// # Note:
+//
+// If you want to initialize both I2C and SPI, then I2C should be initialized first.
 func (c *IO) SetSPI(mode SPIMode, clock SPIClock, byteOrder SPIByteOrder) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
