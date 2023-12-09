@@ -46,6 +46,9 @@ func (c *IO) SetI2C(mode I2CMode) error {
 //	// Print result as a string
 //	fmt.Println(string(r))
 func (c *IO) I2C(addr uint16, w, r []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	const (
 		// The command package of the I2C interface, starting from the secondary byte, is the I2C command stream
 		CmdI2CStream = 0xAA
@@ -80,9 +83,6 @@ func (c *IO) I2C(addr uint16, w, r []byte) error {
 		plen := len(p) - 2
 		p[0] = byte(plen & 0xff)
 		p[1] = byte((plen >> 8) & 0xff)
-
-		c.mu.Lock()
-		defer c.mu.Unlock()
 
 		_, err := c.Dev.Write(p)
 		if err != nil {
