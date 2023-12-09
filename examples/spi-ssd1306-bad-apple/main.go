@@ -13,16 +13,6 @@
 //	- CS1     ->  RES
 package main
 
-//  1. Connect your other USB TTL as follows:
-//
-//     - CH347 UART1      USB to TTL converter
-//
-//     - TX           ->  RX
-//
-//     - RX           ->  TX
-//
-//     - GND          ->  GND
-
 import (
 	"fmt"
 	"time"

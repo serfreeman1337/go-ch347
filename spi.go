@@ -74,14 +74,14 @@ func (c *IO) SetSPI(mode SPIMode, clock SPIClock, byteOrder SPIByteOrder) error 
 	p = append(p, 0x00, 0x02)
 
 	// Bad Apple!! benchmark:
-	//     60MHz	time: 5.01151691s		size: 6572 KiB		rate: 1311.3793923125763 KiB/s
-	//     30MHz	time: 6.665416534s		size: 6572 KiB		rate: 985.9848917883096 KiB/s
-	//     15MHz	time: 8.385592473s		size: 6572 KiB		rate: 783.7251835407671 KiB/s
-	//    7.5MHz	time: 11.87835496s		size: 6572 KiB		rate: 553.2752659885153 KiB/s
-	//   3.75MHz	time: 19.715254824s		size: 6572 KiB		rate: 333.3459323081991 KiB/s
-	//  1.875MHz	time: 35.687317732s		size: 6572 KiB		rate: 184.1550561281617 KiB/s
-	//  937.5KHz	time: 1m3.68030119s		size: 6572 KiB		rate: 103.203029464189 KiB/s
-	// 468.75KHz	time: 2m2.683078174s	size: 6572 KiB		rate: 53.56891999953741 KiB/s
+	//     60MHz	time: 3.365018186s		size: 6572 KiB		rate: 1953.0355 KiB/s
+	//     30MHz	time: 4.973192426s		size: 6572 KiB		rate: 1321.4852 KiB/s
+	//     15MHz	time: 6.619836251s		size: 6572 KiB		rate: 992.7738 KiB/s
+	//    7.5MHz	time: 9.874061537s		size: 6572 KiB		rate: 665.5822 KiB/s
+	//   3.75MHz	time: 16.504592562s		size: 6572 KiB		rate: 398.1922 KiB/s
+	//  1.875MHz	time: 31.494793737s		size: 6572 KiB		rate: 208.66942 KiB/s
+	//  937.5KHz	time: 59.706499492s		size: 6572 KiB		rate: 110.07176 KiB/s
+	// 468.75KHz	time: 1m57.7645783s		size: 6572 KiB		rate: 55.806255 KiB/s
 
 	// byte 16 - SPI Clock
 	// - 60Mhz     - 00	   - 00000000
@@ -135,7 +135,7 @@ func (c *IO) SetSPI(mode SPIMode, clock SPIClock, byteOrder SPIByteOrder) error 
 	}
 
 	if p[2] != 0xc0 && p[3] != 0x01 {
-		// return fmt.Errorf("invalid response. expected (0xc0 0x01), got (0x%02x 0x%02x)", p[2], p[3])
+		// return fmt.Errorf("invalid device response. expected (0xc0 0x01), got (0x%02x 0x%02x)", p[2], p[3])
 		return ErrInvalidResponse
 	}
 
@@ -155,8 +155,9 @@ func (c *IO) SPI(w, r []byte) error {
 
 	wlen := len(w)
 	p := make([]byte, 0, 512)
+	sent := 0
 
-	write := func() error {
+	write := func(finish bool) error {
 		if len(p) <= 2 { // Nothing to write.
 			return nil
 		}
@@ -171,26 +172,34 @@ func (c *IO) SPI(w, r []byte) error {
 			return err
 		}
 
-		// Confirm write.
-		p = p[:5]
-		_, err = c.Dev.Read(p)
-		if err != nil {
-			return err
-		}
-		if p[2] != 0xc4 && p[3] != 0x01 {
-			// return fmt.Errorf("invalid response. expected (0x%02x 0x%02x %02x 0x%02x). got (0x%02x 0x%02x %02x 0x%02x)",
-			// 	0x03, 0x00, 0xc4, 0x01,
-			// 	p[0], p[1], p[2], p[3],
-			// )
-			return ErrInvalidResponse
+		sent++
+
+		// Confirm writes.
+		if finish { // CH347 will perform SPI transfer as soon as all responses are read.
+			for ; sent > 0; sent-- { // For every sent packet.
+				p = p[:5]
+				_, err = c.Dev.Read(p)
+				if err != nil {
+					return err
+				}
+
+				if p[2] != 0xc4 && p[3] != 0x01 {
+					// return fmt.Errorf("invalid device response. expected (0x%02x 0x%02x %02x 0x%02x). got (0x%02x 0x%02x %02x 0x%02x)",
+					// 	0x03, 0x00, 0xc4, 0x01,
+					// 	p[0], p[1], p[2], p[3],
+					// )
+					return ErrInvalidResponse
+				}
+			}
 		}
 
 		p = p[:2]
 		return nil
 	}
 
-	const maxDataLen = 509
-	const maxOpLen = 65535 // Max data length of single SPI Write (0xc4) operation.
+	const maxDataLen = 509 // Maximum data length in a single packet.
+	// One write operation can consist of a maximum of 63 packets. Ensure this by limiting single operation data length.
+	const maxOpLen = 32768 - maxDataLen*2 // Max data length of single SPI Write (0xc4) operation.
 
 	var pos, plen, nlen, olen, dlen int
 
@@ -201,26 +210,26 @@ func (c *IO) SPI(w, r []byte) error {
 				nlen = maxOpLen
 			}
 
-			// Start new packet.
+			// Start a new packet.
 			p = append(p, 0x00, 0x00, CmdSPIWrite, byte(nlen)&0xff, byte(nlen>>8)&0xff)
 		}
 
-		// Calculate data length within packet.
+		// Calculate the data length within a packet.
 		dlen = wlen - pos
 		if plen = len(p); (plen + dlen) > maxDataLen {
 			dlen = maxDataLen - plen
 		}
 
-		// Calculate data length within single write operation.
+		// Calculate the data length within a single write operation.
 		if nlen = (olen + dlen); nlen > maxOpLen {
 			dlen = maxOpLen - olen
 		}
 
 		p = append(p, w[pos:pos+dlen]...)
 
-		// Send packet.
+		// Send a packet.
 		if len(p) >= maxDataLen {
-			err := write()
+			err := write(false)
 			if err != nil {
 				return err
 			}
@@ -229,9 +238,9 @@ func (c *IO) SPI(w, r []byte) error {
 		pos += dlen
 		olen += dlen
 
-		// Finish single write operation and start new one.
+		// Finish a write operation and start a new one.
 		if olen == maxOpLen {
-			err := write()
+			err := write(true)
 			if err != nil {
 				return err
 			}
@@ -241,7 +250,7 @@ func (c *IO) SPI(w, r []byte) error {
 		}
 	}
 
-	return write()
+	return write(true)
 }
 
 // SetCS asserts CS0 pin.
