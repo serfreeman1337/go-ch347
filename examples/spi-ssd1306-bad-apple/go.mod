@@ -1,4 +1,4 @@
-module github.com/serfreeman1337/go-ch347/examples/spi-ssd13306-bad-apple
+module github.com/serfreeman1337/go-ch347/examples/spi-ssd1306-bad-apple
 
 go 1.21.5
 

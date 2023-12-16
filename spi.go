@@ -151,110 +151,154 @@ func (c *IO) SPI(w, r []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if len(r) != 0 { // Sorry, I don't have any available devices to test reads.
-		return errors.ErrUnsupported
-	}
+	const (
+		CmdSPIWrite byte = 0xc4
+		CmdSPIRead  byte = 0xc3
+	)
 
-	const CmdSPIWrite byte = 0xc4
-
-	wlen := len(w)
 	p := make([]byte, 0, 512)
-	sent := 0
 
-	write := func(finish bool) error {
-		if len(p) <= 2 { // Nothing to write.
+	if wlen := len(w); wlen > 0 {
+		sent := 0
+		write := func(finish bool) error {
+			if len(p) <= 2 { // Nothing to write.
+				return nil
+			}
+
+			// Set length in the first 2 bytes.
+			plen := len(p) - 2
+			p[0] = byte(plen & 0xff)
+			p[1] = byte((plen >> 8) & 0xff)
+
+			_, err := c.Dev.Write(p)
+			if err != nil {
+				return err
+			}
+
+			sent++
+
+			// Confirm writes.
+			if finish { // CH347 will perform SPI transfer as soon as all responses are read.
+				for ; sent > 0; sent-- { // For every sent packet.
+					p = p[:5]
+					_, err = c.Dev.Read(p)
+					if err != nil {
+						return err
+					}
+
+					if p[2] != 0xc4 && p[3] != 0x01 {
+						// return fmt.Errorf("invalid device response. expected (0x%02x 0x%02x %02x 0x%02x). got (0x%02x 0x%02x %02x 0x%02x)",
+						// 	0x03, 0x00, 0xc4, 0x01,
+						// 	p[0], p[1], p[2], p[3],
+						// )
+						return ErrInvalidResponse
+					}
+				}
+			}
+
+			p = p[:2]
 			return nil
 		}
 
-		// Set length in the first 2 bytes.
-		plen := len(p) - 2
-		p[0] = byte(plen & 0xff)
-		p[1] = byte((plen >> 8) & 0xff)
+		const maxDataLen = 509 // Maximum data length in a single packet.
+		// One write operation can consist of a maximum of 63 packets. Ensure this by limiting single operation data length.
+		const maxOpLen = 32768 - maxDataLen*2 // Max data length of single SPI Write (0xc4) operation.
+
+		var pos, plen, nlen, olen, dlen int
+		for pos < wlen {
+			if olen == 0 {
+				nlen = (wlen - pos)
+				if nlen > maxOpLen {
+					nlen = maxOpLen
+				}
+
+				// Start a new packet.
+				p = append(p, 0x00, 0x00, CmdSPIWrite, byte(nlen&0xff), byte((nlen>>8)&0xff))
+			}
+
+			// Calculate the data length within a packet.
+			dlen = wlen - pos
+			if plen = len(p); (plen + dlen) > maxDataLen {
+				dlen = maxDataLen - plen
+			}
+
+			// Calculate the data length within a single write operation.
+			if nlen = (olen + dlen); nlen > maxOpLen {
+				dlen = maxOpLen - olen
+			}
+
+			p = append(p, w[pos:pos+dlen]...)
+
+			// Send a packet.
+			if len(p) >= maxDataLen {
+				err := write(false)
+				if err != nil {
+					return err
+				}
+			}
+
+			pos += dlen
+			olen += dlen
+
+			// Finish a write operation and start a new one.
+			if olen == maxOpLen {
+				err := write(true)
+				if err != nil {
+					return err
+				}
+
+				p = p[:0]
+				olen = 0
+			}
+		}
+
+		err := write(true)
+		if err != nil {
+			return err
+		}
+	}
+
+	if rlen := len(r); rlen > 0 {
+		p = p[:9]
+		p[0] = 0x07
+		p[1] = 0x00
+		p[2] = CmdSPIRead
+		p[3] = 0x04
+		p[4] = 0x00
+		p[5] = byte(rlen & 0xff)
+		p[6] = byte((rlen >> 8) & 0xff)
+		p[7] = byte((rlen >> 16) & 0xff)
+		p[8] = byte((rlen >> 24) & 0xff)
 
 		_, err := c.Dev.Write(p)
 		if err != nil {
 			return err
 		}
 
-		sent++
-
-		// Confirm writes.
-		if finish { // CH347 will perform SPI transfer as soon as all responses are read.
-			for ; sent > 0; sent-- { // For every sent packet.
-				p = p[:5]
-				_, err = c.Dev.Read(p)
-				if err != nil {
-					return err
-				}
-
-				if p[2] != 0xc4 && p[3] != 0x01 {
-					// return fmt.Errorf("invalid device response. expected (0x%02x 0x%02x %02x 0x%02x). got (0x%02x 0x%02x %02x 0x%02x)",
-					// 	0x03, 0x00, 0xc4, 0x01,
-					// 	p[0], p[1], p[2], p[3],
-					// )
-					return ErrInvalidResponse
-				}
-			}
-		}
-
-		p = p[:2]
-		return nil
-	}
-
-	const maxDataLen = 509 // Maximum data length in a single packet.
-	// One write operation can consist of a maximum of 63 packets. Ensure this by limiting single operation data length.
-	const maxOpLen = 32768 - maxDataLen*2 // Max data length of single SPI Write (0xc4) operation.
-
-	var pos, plen, nlen, olen, dlen int
-
-	for pos < wlen {
-		if olen == 0 {
-			nlen = (wlen - pos)
-			if nlen > maxOpLen {
-				nlen = maxOpLen
+		var pos, dlen int
+		for pos < rlen {
+			// Calculate the data length within a packet.
+			dlen = rlen - pos
+			if dlen > 507 {
+				dlen = 507
 			}
 
-			// Start a new packet.
-			p = append(p, 0x00, 0x00, CmdSPIWrite, byte(nlen)&0xff, byte(nlen>>8)&0xff)
-		}
-
-		// Calculate the data length within a packet.
-		dlen = wlen - pos
-		if plen = len(p); (plen + dlen) > maxDataLen {
-			dlen = maxDataLen - plen
-		}
-
-		// Calculate the data length within a single write operation.
-		if nlen = (olen + dlen); nlen > maxOpLen {
-			dlen = maxOpLen - olen
-		}
-
-		p = append(p, w[pos:pos+dlen]...)
-
-		// Send a packet.
-		if len(p) >= maxDataLen {
-			err := write(false)
-			if err != nil {
-				return err
-			}
-		}
-
-		pos += dlen
-		olen += dlen
-
-		// Finish a write operation and start a new one.
-		if olen == maxOpLen {
-			err := write(true)
+			p = p[:5+dlen]
+			_, err = c.Dev.Read(p)
 			if err != nil {
 				return err
 			}
 
-			p = p[:0]
-			olen = 0
+			if p[2] != CmdSPIRead || ((int(p[4])<<8)|int(p[3])) != dlen {
+				return ErrInvalidResponse
+			}
+
+			copy(r[pos:pos+dlen], p[5:5+dlen])
+			pos += dlen
 		}
 	}
 
-	return write(true)
+	return nil
 }
 
 // SetCS asserts CS0 pin.
